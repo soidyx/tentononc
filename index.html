@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111111">
+<title>PaperMono – nákupní seznam</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root { --ink: #111; --paper: #fbfaf7; --line: #c9c5bb; --soft: #6b675f; --ok: #1d6b3a; --bad: #9b1c1c; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--paper); color: var(--ink); }
+  body { font: 17px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 16px; max-width: 34rem; margin: 0 auto; }
+  h1 { font-size: 1.3rem; margin: 4px 0 2px; letter-spacing: -0.01em; }
+  .sub { color: var(--soft); margin: 0 0 14px; font-size: 0.95rem; }
+  textarea { display: block; width: 100%; min-height: 15rem; padding: 12px; font: inherit; color: inherit; background: #fff;
+             border: 2px solid var(--ink); border-radius: 10px; resize: vertical; }
+  textarea:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid #2a6fdb; outline-offset: 2px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 8px 2px 14px; color: var(--soft); font-size: 0.95rem; }
+  .link { background: none; border: 0; padding: 4px 0; font: inherit; color: var(--ink); text-decoration: underline; }
+  #send { display: block; width: 100%; padding: 16px; font: inherit; font-weight: 700; font-size: 1.1rem; color: #fff; background: var(--ink);
+          border: 2px solid var(--ink); border-radius: 12px; }
+  #send:disabled { background: #777; border-color: #777; }
+  #status { min-height: 3.2em; margin: 14px 2px; font-weight: 600; white-space: pre-line; }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  .note { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-top: 10px; background: #fff; }
+  .note.warn { border-color: var(--bad); }
+  summary { font-weight: 600; padding: 4px 0; }
+  ol { padding-left: 1.3em; margin: 8px 0; } li { margin: 4px 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1 data-cs="Nákupní seznam do PaperMono" data-en="Shopping list to PaperMono">Nákupní seznam do PaperMono</h1>
+<p class="sub" data-cs="Každá položka na nový řádek." data-en="One item per line.">Každá položka na nový řádek.</p>
+
+<div id="nobt" class="note warn" hidden
+     data-cs="Tento prohlížeč neumí Bluetooth. Otevřete stránku v Chromu na Androidu."
+     data-en="This browser has no Bluetooth support. Open the page in Chrome on Android.">
+</div>
+
+<textarea id="list" autocomplete="off" autocapitalize="sentences" spellcheck="false"
+          aria-label="Seznam" data-cs-placeholder="mléko&#10;chleba&#10;máslo" data-en-placeholder="milk&#10;bread&#10;butter"></textarea>
+<div class="row">
+  <span id="count"></span>
+  <button id="clear" class="link" type="button" data-cs="Vymazat" data-en="Clear">Vymazat</button>
+</div>
+
+<button id="send" type="button" data-cs="Odeslat do PaperMono" data-en="Send to PaperMono">Odeslat do PaperMono</button>
+<div id="status" role="status" aria-live="polite"></div>
+
+<details class="note">
+  <summary data-cs="Jak na to" data-en="How to use">Jak na to</summary>
+  <ol id="howto"></ol>
+</details>
+
+<script>
+'use strict';
+const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';   // text service of the device
+const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // phone -> device
+const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // device -> phone ("OK <n>")
+const CHUNK = 20;                                      // bytes per write; fits every Bluetooth LE connection
+const END = 4;                                         // end-of-list mark
+
+const cs = /^(cs|sk)/i.test(navigator.language || '');
+const T = (c, e) => cs ? c : e;
+const $ = id => document.getElementById(id);
+const list = $('list'), sendBtn = $('send'), statusEl = $('status');
+
+// ---- texts
+document.documentElement.lang = cs ? 'cs' : 'en';
+document.querySelectorAll('[data-cs]').forEach(el => { el.textContent = cs ? el.dataset.cs : el.dataset.en; });
+list.placeholder = cs ? list.dataset.csPlaceholder : list.dataset.enPlaceholder;
+document.title = T('PaperMono – nákupní seznam', 'PaperMono – shopping list');
+$('howto').innerHTML = T(
+  '<li>Na PaperMono otevřete <b>Nákup</b> a klepněte na <b>Z telefonu</b>.</li>' +
+  '<li>Tady klepněte na <b>Odeslat do PaperMono</b> a v nabídce vyberte zařízení <b>PaperMono</b>.</li>' +
+  '<li>Aby šel seznam poslat rovnou z poznámek: v nabídce Chromu (⋮) zvolte <b>Přidat na plochu</b> / <b>Instalovat aplikaci</b>. ' +
+  'Potom v poznámkách klepněte na <b>Sdílet</b> a vyberte <b>PaperMono</b>.</li>',
+  '<li>On the PaperMono open <b>Shopping</b> and tap <b>From phone</b>.</li>' +
+  '<li>Here tap <b>Send to PaperMono</b> and choose the device <b>PaperMono</b>.</li>' +
+  '<li>To send straight from your notes app: in the Chrome menu (⋮) choose <b>Add to Home screen</b> / <b>Install app</b>. ' +
+  'Then tap <b>Share</b> in the notes app and pick <b>PaperMono</b>.</li>');
+
+function setStatus(text, kind) { statusEl.textContent = text; statusEl.className = kind || ''; }
+function lines() { return list.value.split(/\r\n|\r|\n/).filter(l => l.trim() !== ''); }
+function refresh() {
+  const n = lines().length;
+  $('count').textContent = cs ? (n === 1 ? '1 položka' : n >= 2 && n <= 4 ? n + ' položky' : n + ' položek') : (n === 1 ? '1 item' : n + ' items');
+  try { localStorage.setItem('papermono-list', list.value); } catch (e) { /* private mode: nothing to remember */ }
+}
+
+// ---- text arriving from "Share" in another app (see share_target in the manifest), or the last list
+(function init() {
+  const q = new URLSearchParams(location.search);
+  const shared = [q.get('text'), q.get('url')].filter(Boolean).join('\n') || q.get('title') || '';
+  if (shared) {
+    list.value = shared;
+    history.replaceState(null, '', location.pathname);       // do not keep the list in the address
+  } else {
+    try { list.value = localStorage.getItem('papermono-list') || ''; } catch (e) { /* ignore */ }
+  }
+  refresh();
+  if (!navigator.bluetooth) { $('nobt').hidden = false; sendBtn.disabled = true; }
+})();
+list.addEventListener('input', refresh);
+$('clear').addEventListener('click', () => { list.value = ''; refresh(); setStatus(''); list.focus(); });
+
+// ---- sending
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function send() {
+  const items = lines();
+  if (!items.length) { setStatus(T('Seznam je prázdný.', 'The list is empty.'), 'bad'); return; }
+  sendBtn.disabled = true;
+  let device = null;
+  try {
+    setStatus(T('Vyberte zařízení PaperMono…\n(Na něm musí být otevřeno Nákup → Z telefonu.)',
+                'Choose the device PaperMono…\n(It has to show Shopping → From phone.)'));
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [NUS] }, { namePrefix: 'PaperMono' }],
+      optionalServices: [NUS]
+    });
+    setStatus(T('Připojuji…', 'Connecting…'));
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS);
+    const rx = await service.getCharacteristic(RX);
+
+    let reply = '';
+    try {                                                    // the reply is a courtesy; sending works without it
+      const tx = await service.getCharacteristic(TX);
+      tx.addEventListener('characteristicvaluechanged', ev => { reply += new TextDecoder().decode(ev.target.value); });
+      await tx.startNotifications();
+    } catch (e) { /* no notifications */ }
+
+    const text = new TextEncoder().encode(items.join('\n') + '\n');
+    const data = new Uint8Array(text.length + 1);
+    data.set(text);
+    data[text.length] = END;
+    for (let i = 0; i < data.length; i += CHUNK) {
+      const part = data.slice(i, i + CHUNK);
+      if (rx.writeValueWithResponse) await rx.writeValueWithResponse(part); else await rx.writeValue(part);
+      setStatus(T('Odesílám… ', 'Sending… ') + Math.min(100, Math.round((i + CHUNK) * 100 / data.length)) + ' %');
+    }
+    for (let i = 0; i < 40 && !reply.includes('\n'); i++) await sleep(100);     // up to 4 s for "OK <n>"
+
+    const m = /^OK (\d+)/.exec(reply);
+    if (m) setStatus(T('Odesláno. PaperMono přijalo položek: ', 'Sent. Items received by the PaperMono: ') + m[1] + ' ✓', 'ok');
+    else if (/^ERR/.test(reply)) setStatus(T('PaperMono v textu nenašlo žádné položky.', 'The PaperMono found no items in the text.'), 'bad');
+    else setStatus(T('Odesláno, ale PaperMono nepotvrdilo příjem. Podívejte se na jeho displej.',
+                     'Sent, but the PaperMono did not confirm. Check its screen.'), 'ok');
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') setStatus(T('Zařízení nebylo vybráno.', 'No device was chosen.'), 'bad');
+    else setStatus(T('Nepodařilo se: ', 'It did not work: ') + (e && e.message ? e.message : e) +
+                   T('\nJe na PaperMono otevřeno Nákup → Z telefonu a je v telefonu zapnutý Bluetooth?',
+                     '\nIs Shopping → From phone open on the PaperMono, and Bluetooth on in the phone?'), 'bad');
+  } finally {
+    try { if (device && device.gatt.connected) device.gatt.disconnect(); } catch (e) { /* already gone */ }
+    sendBtn.disabled = !navigator.bluetooth;
+  }
+}
+sendBtn.addEventListener('click', send);
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
